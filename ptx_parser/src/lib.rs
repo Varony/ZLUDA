@@ -438,47 +438,148 @@ fn lex_with_span_unchecked<'input>(
     (result, errors)
 }
 
-
-/// ZLUDA's PTX parser does not implement the `red.global.add` reduction
-/// instructions. Rewrite them to `atom.global.add` with a dedicated scratch
-/// register before parsing. This is a general PTX-level workaround.
+/// ZLUDA's PTX parser does not implement the `red.global.*` reduction
+/// instructions or the `%envreg1/%envreg2` cooperative-groups barrier pointer.
+/// Rewrite both before parsing. This is a general PTX-level workaround:
+/// - `red.global.<op>` becomes `atom.global.<op>` with a scratch destination.
+/// - `%envreg1/%envreg2` (the driver-provided grid-barrier state) becomes a
+///   module-scope 8-byte counter. The kernel's own sign-bit barrier protocol
+///   keeps working, and the counter is zero-initialized at module load.
 pub fn rewrite_red(input: &str) -> Option<String> {
-    if !input.contains("red.global.add.") {
+    let has_red = input.contains("red.global.");
+    let has_envreg = input.contains("%envreg");
+    if !has_red && !has_envreg {
         return None;
     }
-    let mut out = String::with_capacity(input.len() + 256);
+
+    // Pick scratch registers that do not collide with the module's own
+    // registers. Virtual PTX registers are cheap; unused ones are eliminated.
+    let mut scratch_r = 4095u32;
+    while scratch_r > 0 && input.contains(&format!("%r{}", scratch_r)) {
+        scratch_r -= 1;
+    }
+    let mut scratch_f = 4095u32;
+    while scratch_f > 0 && input.contains(&format!("%f{}", scratch_f)) {
+        scratch_f -= 1;
+    }
+
+    let replacements: Vec<(&str, String)> = vec![
+        (
+            "red.global.add.u32",
+            format!("atom.global.add.u32 %r{},", scratch_r),
+        ),
+        (
+            "red.global.min.u32",
+            format!("atom.global.min.u32 %r{},", scratch_r),
+        ),
+        (
+            "red.global.max.u32",
+            format!("atom.global.max.u32 %r{},", scratch_r),
+        ),
+        (
+            "red.global.and.u32",
+            format!("atom.global.and.u32 %r{},", scratch_r),
+        ),
+        (
+            "red.global.or.u32",
+            format!("atom.global.or.u32 %r{},", scratch_r),
+        ),
+        (
+            "red.global.xor.u32",
+            format!("atom.global.xor.u32 %r{},", scratch_r),
+        ),
+        (
+            "red.global.add.f32",
+            format!("atom.global.add.f32 %f{},", scratch_f),
+        ),
+        (
+            "red.global.min.f32",
+            format!("atom.global.min.f32 %f{},", scratch_f),
+        ),
+        (
+            "red.global.max.f32",
+            format!("atom.global.max.f32 %f{},", scratch_f),
+        ),
+    ];
+
+    let mut out = String::with_capacity(input.len() + 512);
     let mut pending_func = false;
+    let mut envreg_pending = false;
+    let barrier_decl_pending = has_envreg;
+    let mut barrier_decl_inserted = false;
+
     for line in input.lines() {
         let mut line = line.to_string();
-        const REPLACEMENTS: &[(&str, &str)] = &[
-            ("red.global.add.u32", "atom.global.add.u32 %r4095,"),
-            ("red.global.min.u32", "atom.global.min.u32 %r4095,"),
-            ("red.global.max.u32", "atom.global.max.u32 %r4095,"),
-            ("red.global.and.u32", "atom.global.and.u32 %r4095,"),
-            ("red.global.or.u32",  "atom.global.or.u32 %r4095,"),
-            ("red.global.xor.u32", "atom.global.xor.u32 %r4095,"),
-            ("red.global.add.f32", "atom.global.add.f32 %f4095,"),
-            ("red.global.min.f32", "atom.global.min.f32 %f4095,"),
-            ("red.global.max.f32", "atom.global.max.f32 %f4095,"),
-        ];
-        for (from, to) in REPLACEMENTS {
-            if line.contains(from) {
-                line = line.replace(from, to);
+
+        // Insert the barrier state after the module header. `.address_size`
+        // follows `.target` in normal PTX; prefer it so the declaration is
+        // always at module scope.
+        if barrier_decl_pending && !barrier_decl_inserted {
+            let is_address_size = line.trim_start().starts_with(".address_size");
+            let is_target = line.trim_start().starts_with(".target");
+            if is_address_size || (is_target && !input.contains(".address_size")) {
+                out.push_str(&line);
+                out.push('\n');
+                out.push_str(".global .align 8 .u64 __zluda_grid_barrier;\n");
+                barrier_decl_inserted = true;
+                continue;
             }
         }
+
+        if has_red {
+            for (from, to) in &replacements {
+                if line.contains(from) {
+                    line = line.replace(from, to);
+                }
+            }
+        }
+
+        if has_envreg {
+            if line.contains("%envreg2") {
+                line = line.replace("%envreg2", "0");
+                envreg_pending = true;
+            }
+            if line.contains("%envreg1") {
+                line = line.replace("%envreg1", "0");
+                envreg_pending = true;
+            }
+            let trimmed = line.trim();
+            if envreg_pending && trimmed.starts_with("bfi.b64 ") {
+                let dst = trimmed["bfi.b64 ".len()..]
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !dst.is_empty() {
+                    line = format!("mov.u64 {}, __zluda_grid_barrier;", dst);
+                    envreg_pending = false;
+                }
+            }
+        }
+
         out.push_str(&line);
         out.push('\n');
         if line.contains(".entry ") || line.contains(".func ") {
             pending_func = true;
         }
         if pending_func && line.contains('{') {
-            out.push_str(".reg .u32 %r4095;\n.reg .f32 %f4095;\n");
+            if has_red {
+                out.push_str(&format!(
+                    ".reg .u32 %r{};\n.reg .f32 %f{};\n",
+                    scratch_r, scratch_f
+                ));
+            }
             pending_func = false;
         } else if pending_func && line.trim_end().ends_with(';') {
             // A .func prototype, not a function body.
             pending_func = false;
         }
     }
+
+    if has_envreg && !barrier_decl_inserted {
+        out.insert_str(0, ".global .align 8 .u64 __zluda_grid_barrier;\n");
+    }
+
     Some(out)
 }
 
@@ -490,10 +591,30 @@ mod rewrite_red_tests {
     fn rewrites_global_add() {
         let input = ".version 8.3\n.target sm_52\n.address_size 64\n.visible .entry k(.param .u64 a) {\n    red.global.add.u32 [%rd1], 1;\n    red.global.add.f32 [%rd2], %f1;\n    ret;\n}\n";
         let out = rewrite_red(input).expect("red should be rewritten");
-        assert!(out.contains("atom.global.add.u32 %r4095, [%rd1], 1;"), "{out}");
-        assert!(out.contains("atom.global.add.f32 %f4095, [%rd2], %f1;"), "{out}");
+        assert!(
+            out.contains("atom.global.add.u32 %r4095, [%rd1], 1;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("atom.global.add.f32 %f4095, [%rd2], %f1;"),
+            "{out}"
+        );
         assert!(out.contains(".reg .u32 %r4095;"), "{out}");
         assert!(out.contains(".reg .f32 %f4095;"), "{out}");
+        let parsed = super::parse_module_unchecked(&out);
+        assert_eq!(parsed.invalid_directives, 0, "{out}");
+    }
+
+    #[test]
+    fn rewrites_envreg_barrier() {
+        let input = ".version 8.3\n.target sm_52\n.address_size 64\n.visible .entry k() {\n    mov.u32 %r1, %envreg2;\n    cvt.u64.u32 %rd1, %r1;\n    mov.u32 %r2, %envreg1;\n    cvt.u64.u32 %rd2, %r2;\n    bfi.b64 %rd3, %rd2, %rd1, 32, 32;\n    ld.volatile.u32 %r3, [%rd3+4];\n    ret;\n}\n";
+        let out = rewrite_red(input).expect("envreg should be rewritten");
+        assert!(
+            out.contains(".global .align 8 .u64 __zluda_grid_barrier;"),
+            "{out}"
+        );
+        assert!(out.contains("mov.u64 %rd3, __zluda_grid_barrier;"), "{out}");
+        assert!(!out.contains("%envreg"), "{out}");
         let parsed = super::parse_module_unchecked(&out);
         assert_eq!(parsed.invalid_directives, 0, "{out}");
     }

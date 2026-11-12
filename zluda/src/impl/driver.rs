@@ -734,8 +734,11 @@ pub(crate) unsafe fn launch_kernel_ex(
 ) -> CUresult {
     let attrs = std::slice::from_raw_parts(config.attrs, config.numAttrs as usize);
     if attrs.iter().any(|&attr| {
-        !(attr.id == CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+        let supported = (attr.id
+            == CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
             && attr.value.programmaticStreamSerializationAllowed == 0)
+            || attr.id == CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_COOPERATIVE;
+        !supported
     }) {
         return CUresult::ERROR_NOT_SUPPORTED;
     }

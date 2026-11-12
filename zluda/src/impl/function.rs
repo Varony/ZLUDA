@@ -137,6 +137,38 @@ pub(crate) unsafe fn launch_kernel(
     }
 }
 
+/// Cooperative launches use the same HIP module launch. The PTX preprocessor
+/// replaces NVCC's driver-provided `%envreg` grid-barrier pointer with a
+/// module-scope counter, so the kernel's own barrier protocol handles grid
+/// synchronization. The grid must fit the device for the barrier to make
+/// progress, which is the same residency requirement as a cooperative launch.
+pub(crate) unsafe fn launch_cooperative_kernel(
+    f: &Function,
+    grid_dim_x: ::core::ffi::c_uint,
+    grid_dim_y: ::core::ffi::c_uint,
+    grid_dim_z: ::core::ffi::c_uint,
+    block_dim_x: ::core::ffi::c_uint,
+    block_dim_y: ::core::ffi::c_uint,
+    block_dim_z: ::core::ffi::c_uint,
+    shared_mem_bytes: ::core::ffi::c_uint,
+    stream: hipStream_t,
+    kernel_params: *mut *mut ::core::ffi::c_void,
+) -> hipError_t {
+    launch_kernel(
+        f,
+        grid_dim_x,
+        grid_dim_y,
+        grid_dim_z,
+        block_dim_x,
+        block_dim_y,
+        block_dim_z,
+        shared_mem_bytes,
+        stream,
+        kernel_params,
+        std::ptr::null_mut(),
+    )
+}
+
 pub(crate) unsafe fn set_attribute(
     func: &Function,
     attribute: CUfunction_attribute,

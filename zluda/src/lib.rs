@@ -233,7 +233,7 @@ cuda_macros::cuda_function_declarations!(
             cuTexRefSetFormat,
             cuThreadExchangeStreamCaptureMode,
         ],
-    implemented_in_function <= [cuLaunchKernel,],
+    implemented_in_function <= [cuLaunchKernel, cuLaunchCooperativeKernel],
     implemented_windows
         <= [
             cuD3D11GetDevice,
