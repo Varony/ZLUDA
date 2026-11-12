@@ -438,6 +438,67 @@ fn lex_with_span_unchecked<'input>(
     (result, errors)
 }
 
+
+/// ZLUDA's PTX parser does not implement the `red.global.add` reduction
+/// instructions. Rewrite them to `atom.global.add` with a dedicated scratch
+/// register before parsing. This is a general PTX-level workaround.
+pub fn rewrite_red(input: &str) -> Option<String> {
+    if !input.contains("red.global.add.") {
+        return None;
+    }
+    let mut out = String::with_capacity(input.len() + 256);
+    let mut pending_func = false;
+    for line in input.lines() {
+        let mut line = line.to_string();
+        const REPLACEMENTS: &[(&str, &str)] = &[
+            ("red.global.add.u32", "atom.global.add.u32 %r4095,"),
+            ("red.global.min.u32", "atom.global.min.u32 %r4095,"),
+            ("red.global.max.u32", "atom.global.max.u32 %r4095,"),
+            ("red.global.and.u32", "atom.global.and.u32 %r4095,"),
+            ("red.global.or.u32",  "atom.global.or.u32 %r4095,"),
+            ("red.global.xor.u32", "atom.global.xor.u32 %r4095,"),
+            ("red.global.add.f32", "atom.global.add.f32 %f4095,"),
+            ("red.global.min.f32", "atom.global.min.f32 %f4095,"),
+            ("red.global.max.f32", "atom.global.max.f32 %f4095,"),
+        ];
+        for (from, to) in REPLACEMENTS {
+            if line.contains(from) {
+                line = line.replace(from, to);
+            }
+        }
+        out.push_str(&line);
+        out.push('\n');
+        if line.contains(".entry ") || line.contains(".func ") {
+            pending_func = true;
+        }
+        if pending_func && line.contains('{') {
+            out.push_str(".reg .u32 %r4095;\n.reg .f32 %f4095;\n");
+            pending_func = false;
+        } else if pending_func && line.trim_end().ends_with(';') {
+            // A .func prototype, not a function body.
+            pending_func = false;
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod rewrite_red_tests {
+    use super::rewrite_red;
+
+    #[test]
+    fn rewrites_global_add() {
+        let input = ".version 8.3\n.target sm_52\n.address_size 64\n.visible .entry k(.param .u64 a) {\n    red.global.add.u32 [%rd1], 1;\n    red.global.add.f32 [%rd2], %f1;\n    ret;\n}\n";
+        let out = rewrite_red(input).expect("red should be rewritten");
+        assert!(out.contains("atom.global.add.u32 %r4095, [%rd1], 1;"), "{out}");
+        assert!(out.contains("atom.global.add.f32 %f4095, [%rd2], %f1;"), "{out}");
+        assert!(out.contains(".reg .u32 %r4095;"), "{out}");
+        assert!(out.contains(".reg .f32 %f4095;"), "{out}");
+        let parsed = super::parse_module_unchecked(&out);
+        assert_eq!(parsed.invalid_directives, 0, "{out}");
+    }
+}
+
 pub fn parse_module_checked<'input>(
     text: &'input str,
 ) -> Result<ast::Module<'input>, Vec<PtxError<'input>>> {

@@ -172,7 +172,10 @@ fn get_best_ptx_and_compile(
     unsafe {
         CodeLibraryRef::iterate_modules(image, |_, module| match module {
             Ok(CodeModuleRef::Text(ptx)) => {
-                ptx_modules.push(Cow::Borrowed(ptx));
+                ptx_modules.push(match ptx_parser::rewrite_red(ptx) {
+                    Some(rewritten) => Cow::Owned(rewritten),
+                    None => Cow::Borrowed(ptx),
+                });
             }
             Ok(CodeModuleRef::File(file)) => {
                 if file.header.kind != FatbinFileHeader::HEADER_KIND_PTX {
@@ -180,7 +183,10 @@ fn get_best_ptx_and_compile(
                 }
                 if let Ok(text) = file.get_or_decompress_content(true) {
                     if let Some(text) = cow_bytes_to_str(text) {
-                        ptx_modules.push(text);
+                        ptx_modules.push(match ptx_parser::rewrite_red(&text) {
+                            Some(rewritten) => Cow::Owned(rewritten),
+                            None => text,
+                        });
                     }
                 }
             }

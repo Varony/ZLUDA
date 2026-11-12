@@ -1,0 +1,36 @@
+name: build-red-windows
+
+on:
+  push:
+    branches: [red-global-add]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          submodules: true
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Test PTX rewrite
+        run: cargo test -p ptx_parser rewrite_red
+
+      - name: Build patched nvcuda.dll
+        run: cargo build -p zluda --release
+
+      - name: Upload nvcuda.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvcuda-red
+          path: target/release/nvcuda.dll
+          if-no-files-found: error
