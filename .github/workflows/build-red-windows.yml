@@ -21,6 +21,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          # Do not turn upstream warnings into hard errors; we only need the DLL.
+          rustflags: ""
 
       - name: Test PTX rewrite
         run: cargo test -p ptx_parser rewrite_red
