@@ -117,6 +117,19 @@ fn try_use_ninja(cmake: &mut Config) {
 // We resort to this garbage because Cargo is ideologically opposed to
 // being useful, see here: https://github.com/rust-lang/cargo/issues/11054
 fn try_get_build_profile_name() -> String {
+    // Cargo sets PROFILE for build scripts. Prefer it: newer Cargo versions
+    // use target/<profile>/build/<package>/<hash>/out, which breaks the
+    // OUT_DIR path guess below (it yields the package name or "build").
+    if let Ok(profile) = env::var("PROFILE") {
+        let name = match profile.as_str() {
+            "dev" => "debug",
+            other => other,
+        };
+        if ["debug", "dev-llvm", "release", "release-lto"].contains(&name) {
+            return name.to_string();
+        }
+    }
+
     let mut path = PathBuf::from(env::var("OUT_DIR").unwrap());
     path.pop();
     path.pop();
